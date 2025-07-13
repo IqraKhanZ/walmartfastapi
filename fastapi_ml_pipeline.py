@@ -87,17 +87,7 @@ class SKUDemandPredictor:
         self.monthly_data = None
         self.historical_top_skus = {}
         
-    def convert_google_drive_url(url: str) -> str:
-      """Convert Google Drive sharing URL to direct download URL"""
-      if "drive.google.com" in url:
-          # Extract file ID from the URL
-          if "/file/d/" in url:
-            file_id = url.split("/file/d/")[1].split("/")[0]
-            return f"https://drive.google.com/uc?export=download&id={file_id}"
-          elif "id=" in url:
-              file_id = url.split("id=")[1].split("&")[0]
-              return f"https://drive.google.com/uc?export=download&id={file_id}"
-      return url
+    
     def load_and_preprocess_data(self, file_path_or_df):
        """
     Load and preprocess the CSV data
@@ -561,7 +551,17 @@ def upload_to_supabase(file_content: bytes, file_name: str) -> str:
         logger.error(f"Error uploading to Supabase: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to upload to Supabase: {str(e)}")
 
-
+def convert_google_drive_url(url: str) -> str:
+    """Convert Google Drive sharing URL to direct download URL"""
+    if "drive.google.com" in url:
+        # Extract file ID from the URL
+        if "/file/d/" in url:
+            file_id = url.split("/file/d/")[1].split("/")[0]
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
+        elif "id=" in url:
+            file_id = url.split("id=")[1].split("&")[0]
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
+    return url
 async def process_ml_pipeline(df: pd.DataFrame) -> Dict[str, Any]:
     """Process the ML pipeline and return results"""
     try:
