@@ -87,6 +87,17 @@ class SKUDemandPredictor:
         self.monthly_data = None
         self.historical_top_skus = {}
         
+    def convert_google_drive_url(url: str) -> str:
+      """Convert Google Drive sharing URL to direct download URL"""
+      if "drive.google.com" in url:
+          # Extract file ID from the URL
+          if "/file/d/" in url:
+            file_id = url.split("/file/d/")[1].split("/")[0]
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
+          elif "id=" in url:
+              file_id = url.split("id=")[1].split("&")[0]
+              return f"https://drive.google.com/uc?export=download&id={file_id}"
+      return url
     def load_and_preprocess_data(self, file_path_or_df):
        """
     Load and preprocess the CSV data
@@ -644,18 +655,41 @@ async def predict_demand(
         if not file.filename.endswith('.csv'):
             raise HTTPException(status_code=400, detail="File must be a CSV")
         
-        # Read CSV file
+        # Read CSV file with better error handling
         contents = await file.read()
-        df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
+        
+        # Try different encodings
+        try:
+            content_str = contents.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                content_str = contents.decode('utf-8-sig')
+            except UnicodeDecodeError:
+                content_str = contents.decode('latin-1')
+        
+        # Try to parse CSV with different parameters
+        try:
+            df = pd.read_csv(io.StringIO(content_str))
+        except pd.errors.ParserError:
+            try:
+                df = pd.read_csv(io.StringIO(content_str), sep=';')
+            except:
+                df = pd.read_csv(io.StringIO(content_str), sep=',', quotechar='"', skipinitialspace=True)
+        
+        # Validate that we have data
+        if df.empty:
+            raise HTTPException(status_code=400, detail="CSV file is empty")
         
         # Validate required columns
         required_columns = ['date', 'sku', 'item', 'category', 'quantity', 'location']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
+            # Show available columns to help debug
+            available_columns = list(df.columns)
             raise HTTPException(
                 status_code=400, 
-                detail=f"Missing required columns: {missing_columns}"
+                detail=f"Missing required columns: {missing_columns}. Available columns: {available_columns}"
             )
         
         # Process ML pipeline
@@ -665,8 +699,8 @@ async def predict_demand(
         
     except pd.errors.EmptyDataError:
         raise HTTPException(status_code=400, detail="CSV file is empty")
-    except pd.errors.ParserError:
-        raise HTTPException(status_code=400, detail="Invalid CSV format")
+    except pd.errors.ParserError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid CSV format: {str(e)}")
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -680,24 +714,56 @@ async def predict_from_url(
     Download CSV from URL and run ML pipeline
     
     Args:
-        file_url: URL to CSV file
+        file_url: URL to CSV file (supports Google Drive links)
     """
     try:
-        # Download file from URL
-        response = requests.get(file_url)
+        # Convert Google Drive URL if necessary
+        download_url = convert_google_drive_url(file_url)
+        
+        # Download file from URL with proper headers
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        response = requests.get(download_url, headers=headers, timeout=30)
         response.raise_for_status()
         
-        # Read CSV
-        df = pd.read_csv(io.StringIO(response.text))
+        # Check if we got HTML instead of CSV (happens with Google Drive sometimes)
+        content_type = response.headers.get('content-type', '').lower()
+        if 'text/html' in content_type:
+            raise HTTPException(
+                status_code=400, 
+                detail="Received HTML instead of CSV. Please ensure the Google Drive file is publicly accessible and use a direct download link."
+            )
+        
+        # Try to read CSV with different encodings
+        try:
+            df = pd.read_csv(io.StringIO(response.text))
+        except UnicodeDecodeError:
+            # Try with different encoding
+            df = pd.read_csv(io.StringIO(response.content.decode('utf-8-sig')))
+        except pd.errors.ParserError:
+            # Try with different separator
+            try:
+                df = pd.read_csv(io.StringIO(response.text), sep=';')
+            except:
+                # Try with different parameters
+                df = pd.read_csv(io.StringIO(response.text), sep=',', quotechar='"', skipinitialspace=True)
+        
+        # Validate that we have data
+        if df.empty:
+            raise HTTPException(status_code=400, detail="CSV file is empty")
         
         # Validate required columns
         required_columns = ['date', 'sku', 'item', 'category', 'quantity', 'location']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
+            # Show available columns to help debug
+            available_columns = list(df.columns)
             raise HTTPException(
                 status_code=400, 
-                detail=f"Missing required columns: {missing_columns}"
+                detail=f"Missing required columns: {missing_columns}. Available columns: {available_columns}"
             )
         
         # Process ML pipeline
@@ -707,9 +773,14 @@ async def predict_from_url(
         
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=400, detail=f"Failed to download file: {str(e)}")
+    except pd.errors.EmptyDataError:
+        raise HTTPException(status_code=400, detail="CSV file is empty")
+    except pd.errors.ParserError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid CSV format: {str(e)}")
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 
 @app.get("/storage-test")
 async def test_storage():
